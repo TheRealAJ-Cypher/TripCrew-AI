@@ -83,3 +83,30 @@ block-beta
     G_SPEC["Specialist & Draft Nodes\nflight, hotel, weather, budget, itinerary"]
     G_HITL["HITL & Finalizer\nhuman_approval -> final_agent"]
   end
+
+##Multi-Agent Topology & Control Flow
+
+flowchart TD
+    Client([Browser UI - index.html and script.js]) -->|POST /api/travel| FastAPI[FastAPI Server - app.py]
+    Client -->|POST /api/travel/resume| FastAPI
+
+    FastAPI --> Supervisor{supervisor_agent + Input Guardrail}
+    Supervisor -->|Blocked / Non-Travel| Blocked[guardrail_blocked] --> EndNode([END])
+
+    Supervisor -->|Allowed: selected_agents and trip_constraints| Flight[flight_agent]
+    Flight --> Hotel[hotel_agent]
+    Hotel --> Weather[weather_agent]
+    Weather --> Budget[budget_agent]
+    Budget --> Itinerary[itinerary_agent]
+
+    Itinerary --> HITL[[human_approval - LangGraph interrupt]]
+    HITL -->|Command resume approved or feedback| Final[final_agent - 7-Section Plan]
+    Final --> EndNode
+
+    Flight <-->|MCP / Aviation Helpers| MCP[mcp_client.py and custom_weather_mcp_server.py]
+    Hotel <-->|MCP / Search Helpers| MCP
+    Weather <-->|MCP / Weather Helpers| MCP
+
+    Supervisor -.->|State Snapshots| PG[(PostgreSQL Checkpointer)]
+    HITL -.->|Pause and Resume State| PG
+    Final -.->|Final Checkpoint| PG
