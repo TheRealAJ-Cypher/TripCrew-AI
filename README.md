@@ -1,247 +1,134 @@
-
-# TripCrew-AI — Production Multi-Agent Travel Orchestration System
+# TripCrew-AI — Multi-Agent Travel Planning System
 
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![LangGraph](https://img.shields.io/badge/Orchestration-LangGraph-1C3C3C?logo=langchain&logoColor=white)](https://www.langchain.com/langgraph)
 [![FastAPI](https://img.shields.io/badge/API-FastAPI-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
-[![Groq](https://img.shields.io/badge/Inference-Groq%20LPU-F55036)](https://groq.com/)
+[![Groq](https://img.shields.io/badge/Inference-Groq-F55036)](https://groq.com/)
 [![MCP](https://img.shields.io/badge/Protocol-Model%20Context%20Protocol-000000)](https://modelcontextprotocol.io/)
 [![PostgreSQL](https://img.shields.io/badge/Persistence-PostgreSQL%20Checkpointer-4169E1?logo=postgresql&logoColor=white)](https://www.postgresql.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-**TripCrew-AI** is a stateful, production-grade multi-agent travel planning engine built with **LangGraph**, **FastAPI**, **Groq**, and the **Model Context Protocol (MCP)**. It decomposes natural-language travel requests into an orchestrated multi-agent execution graph featuring a **Supervisor Agent**, specialized domain workers (Flight, Hotel, Itinerary, and Synthesis), pre- and post-execution **safety guardrails**, durable **PostgreSQL checkpointing**, and **Human-in-the-Loop (HITL)** approval gates.
-
----
-
-## Table of Contents
-
-- [Architectural Overview](#architectural-overview)
-- [Multi-Agent Topology & Control Flow](#multi-agent-topology--control-flow)
-- [Agent & Subsystem Specifications](#agent--subsystem-specifications)
-- [Repository Structure](#repository-structure)
-- [Getting Started](#getting-started)
-  - [Prerequisites](#prerequisites)
-  - [Installation](#installation)
-  - [Environment Configuration](#environment-configuration)
-  - [Running the Application](#running-the-application)
-- [API Reference](#api-reference)
-- [State Persistence, Guardrails & HITL](#state-persistence-guardrails--hitl)
-- [Testing](#testing)
-- [License](#license)
+**TripCrew-AI** is a multi-agent travel planning application built with **FastAPI**, **LangGraph**, **Groq**, **PostgreSQL**, and **Model Context Protocol (MCP)** integrations. Developed across three progressive milestones—**Part 1**, **Part 2**, and **Part 3**—it combines input guardrails, supervisor-driven agent selection and constraint extraction, MCP-backed specialist tools, PostgreSQL state checkpointing, and Human-in-the-Loop (HITL) plan review.
 
 ---
 
-## Architectural Overview
+## Project Milestones (Parts 1, 2 & 3)
 
-Single-prompt LLM pipelines struggle with multi-constraint travel planning due to context drift, stale fare data, and unverified tool calls. **TripCrew-AI** solves this by modeling travel synthesis as a deterministic, fault-tolerant state machine:
-
-- **Supervisor-Orchestrated Cyclic Graph:** A central **Supervisor Agent** inspects shared `StateGraph` state, routes bounded subtasks across specialized **Flight**, **Hotel**, **Itinerary**, and **Response** agents, and enforces termination criteria.
-- **Low-Latency Inference with Groq:** Agent reasoning, structured routing decisions, and tool-call generation run on **Groq** inference infrastructure for sub-second orchestration turns.
-- **Standardized Tooling via MCP:** External domain integrations—including **AviationStack** (real-time flight schedules/routes) and **Tavily** (live web search for accommodations, local attractions, and travel advisories)—are decoupled from agent logic via the **Model Context Protocol (MCP)** inside `tools/`.
-- **Durable State & Thread Continuity:** Backed by a **PostgreSQL checkpointer**, every graph super-step is persisted against a session `thread_id`, enabling multi-turn follow-ups, crash recovery, and deterministic replay.
-- **Human-in-the-Loop (HITL) Interrupts:** Execution pauses at critical itinerary milestones via LangGraph `interrupt` checkpoints, allowing users to review, approve, or modify proposed flights, hotels, and budget allocations in the web UI before finalization.
+| Part | Release Tag | Summary |
+| :--- | :--- | :--- |
+| **Part 1** | `v1.0-part1-MultiAgent_Workflow_Baseline` | Foundational multi-agent travel planning workflow and FastAPI web interface. |
+| **Part 2** | `v2.0-part2-MultiAgent_MCP_Integration` | Added MCP client integration (`mcp_client.py`) and custom weather MCP server (`custom_weather_mcp_server.py`) for flights, search, and weather. |
+| **Part 3** | `v3.0-part3-Supervisor_Guardrails_Safety_HITL` | Added input guardrail validation, `supervisor_agent` routing & trip constraint extraction, PostgreSQL checkpointing (`PostgresSaver`), and HITL `interrupt()` / `Command(resume=...)` review & revision. |
 
 ---
 
-## Multi-Agent Topology & Control Flow
+## System Architecture Diagram (Part 3)
 
 ```mermaid
-graph TD
-    Client([Web UI / REST Client]) -->|POST /api/travel| FastAPI[FastAPI Gateway - app.py]
-    FastAPI --> GuardIn[Ingress Safety Guardrail]
-    GuardIn -->|Policy Violation / Injection| Refuse([Safe Refusal Response])
-    GuardIn -->|Validated Request| Supervisor{Supervisor Agent}
+flowchart TD
+    UI[Web UI - templates/index.html & static/script.js] -->|POST /api/travel| API[FastAPI Server - app.py]
+    UI -->|POST /api/travel/resume| API
 
-    Supervisor -->|Route: Flights| FlightAgent[Flight Search Agent]
-    Supervisor -->|Route: Hotels| HotelAgent[Hotel Research Agent]
-    Supervisor -->|Route: Planning| ItineraryAgent[Itinerary Planning Agent]
-    Supervisor -->|Review Checkpoint| HITL[[HITL Interrupt Gate]]
-    Supervisor -->|Approved Plan| FinalAgent[Final Synthesis Agent]
+    API --> SUP[supervisor_agent + Input Guardrail]
+    SUP -->|Blocked / Non-Travel| BLK[guardrail_blocked] --> END_NODE([END])
 
-    FlightAgent <-->|MCP Tool Call| AviationStack[(AviationStack API)]
-    HotelAgent <-->|MCP Tool Call| Tavily[(Tavily Search API)]
-    ItineraryAgent <-->|MCP Tool Call| Tavily
+    SUP -->|Allowed: selected_agents & trip_constraints| FLT[flight_agent]
+    FLT --> HTL[hotel_agent]
+    HTL --> WTH[weather_agent]
+    WTH --> BDG[budget_agent]
+    BDG --> ITN[itinerary_agent]
 
-    FlightAgent --> Supervisor
-    HotelAgent --> Supervisor
-    ItineraryAgent --> Supervisor
+    ITN --> HITL[human_approval - LangGraph interrupt]
+    HITL -->|Command resume approved / feedback| FIN[final_agent - 7-Section Plan]
+    FIN --> END_NODE
 
-    HITL -->|User Edits / Re-plan| Supervisor
-    HITL -->|User Approved| FinalAgent
+    FLT <--> MCP[mcp_client.py & custom_weather_mcp_server.py]
+    HTL <--> MCP
+    WTH <--> MCP
 
-    FinalAgent --> GuardOut[Egress Grounding & Budget Guardrail]
-    GuardOut --> FastAPI
+    SUP -.-> PG[(PostgreSQL Checkpointer - PostgresSaver)]
+    HITL -.-> PG
+    FIN -.-> PG
 
-    Supervisor -.->|State Snapshots| PG[(PostgreSQL Checkpointer)]
-    HITL -.->|Checkpoint Resume| PG
+## Component Block Diagram
++-------------------------------------------------------------------------------+
+|                                 TripCrew-AI                                   |
+|                                                                               |
+|  +-------------------------+   +-----------------------+   +---------------+  |
+|  | Frontend UI             |   | FastAPI Layer         |   | LLM & State   |  |
+|  | - templates/index.html  |   | - app.py              |   | - ChatGroq    |  |
+|  | - static/script.js      |   | - /api/travel         |   | - TravelState |  |
+|  | - HITL Review Panel     |   | - /api/travel/resume  |   |               |  |
+|  +-------------------------+   +-----------------------+   +---------------+  |
+|                                                                               |
+|  +-------------------------------------------------------------------------+  |
+|  | LangGraph Orchestration (backend.py)                                    |  |
+|  |                                                                         |  |
+|  |  [Input Guardrail + Supervisor] --> [Selected Specialist Agents]        |  |
+|  |         (flight_agent, hotel_agent, weather_agent, budget_agent)        |  |
+|  |                |                                                        |  |
+|  |                v                                                        |  |
+|  |  [itinerary_agent] --> [human_approval interrupt()] --> [final_agent]   |  |
+|  +-------------------------------------------------------------------------+  |
+|                                                                               |
+|  +-------------------------+   +-----------------------+   +---------------+  |
+|  | MCP & Tool Layer        |   | Checkpointing         |   | Version Tags  |  |
+|  | - mcp_client.py         |   | - PostgreSQL          |   | - v1.0-part1  |  |
+|  | - custom_weather_mcp    |   | - PostgresSaver       |   | - v2.0-part2  |  |
+|  |   _server.py            |   | - thread_id state     |   | - v3.0-part3  |  |
+|  +-------------------------+   +-----------------------+   +---------------+  |
++-------------------------------------------------------------------------------+
 
-```
-
----
-
-## Agent & Subsystem Specifications
-
-| Component | Architectural Role | External Integrations & Mechanisms |
-| --- | --- | --- |
-| **Supervisor Agent** | Central planner, task router & state evaluator | Structured output routing, constraint tracking (dates, budget, origin IATA), delegation & convergence control |
-| **Flight Search Agent** | Commercial flight discovery & route filtering | **AviationStack API** via MCP tool bindings; normalizes carrier, schedule, and routing options from `DEFAULT_ORIGIN_IATA` |
-| **Hotel Research Agent** | Accommodation sourcing & budget matching | **Tavily Search API** via MCP tool bindings; retrieves neighborhood, pricing tier, and property availability context |
-| **Itinerary Planning Agent** | Day-by-day schedule & logistics synthesis | Combines flight arrival/departure windows, hotel proximity, and Tavily local attraction intelligence |
-| **Final Response Agent** | Structured output formatting & presentation | Compiles verified flight, lodging, and daily schedule blocks into a clean client-ready response |
-| **Safety Guardrails** | Ingress & egress policy enforcement | Prompt-injection filtering, off-topic deflection, budget/date sanity checks, and tool-grounding verification |
-| **PostgreSQL Checkpointer** | Thread-scoped persistent graph memory | Serializes `StateGraph` checkpoints across turns and preserves paused `interrupt` states |
-| **FastAPI + Jinja2 UI (`app.py`)** | Asynchronous REST API & interactive frontend | Serves `templates/` + `static/`, exposes `/health` and `/api/travel`, and manages HITL resume payloads |
-
----
+Component,Role,Key Responsibilities
+app.py,API & Web Server,Serves the web UI and exposes endpoints to start and resume travel planning runs.
+supervisor_agent,Guardrail & Router,"Validates travel relevance/safety, extracts trip_constraints, and selects needed specialist agents."
+flight_agent,Flight Specialist,"Queries aviation MCP helpers and summarizes airports, airlines, duration/stops, fares, and booking tips."
+hotel_agent,Accommodation Specialist,Searches hotel/stay guidance via MCP/search helpers with graceful fallback messaging when live data is unavailable.
+weather_agent,Weather & Packing Specialist,Extracts destination and retrieves current weather and forecast data via MCP/weather helpers.
+budget_agent,Budget Analyst,"Evaluates cost categories, budget risks, money-saving options, and feasibility against trip constraints."
+itinerary_agent,Draft Itinerary Builder,Generates a day-by-day draft plan and prepares the approval prompt for human review.
+human_approval,HITL Checkpoint,"Pauses execution with interrupt() and resumes with Command(resume={""approved"": ..., ""feedback"": ...})."
+final_agent,Final Synthesizer,Produces the complete 7-section travel plan incorporating approval or revision feedback.
+mcp_client.py & custom_weather_mcp_server.py,MCP & Tool Layer,Provides async/sync wrappers and custom MCP weather server functionality.
 
 ## Repository Structure
 
-```text
 TripCrew-AI/
-├── app.py                 # FastAPI server entrypoint, REST endpoints (/health, /api/travel), and UI routes
-├── backend.py             # LangGraph StateGraph definition, Supervisor/worker nodes, guardrails & PG checkpointer
-├── test.py                # Automated tests for graph execution, tool bindings, and guardrail behavior
-├── requirements.txt       # Python runtime and framework dependencies
-├── tools/                 # MCP-compliant tool wrappers for AviationStack flight search and Tavily web search
-├── templates/             # Jinja2 HTML templates for the interactive web interface
-├── static/                # Client-side JavaScript and CSS assets
-├── .gitignore             # Git exclusion rules
-└── LICENSE                # MIT License
+├── app.py                        # FastAPI web server and API routes
+├── backend.py                    # LangGraph graph, supervisor, guardrails, HITL & Postgres checkpointer
+├── mcp_client.py                 # MCP and external tool client wrappers
+├── custom_weather_mcp_server.py  # Custom MCP weather server
+├── requirements.txt              # Python dependencies
+├── static/
+│   └── script.js                 # Frontend logic, HITL controls, Markdown rendering, copy & PDF export
+└── templates/
+    └── index.html                # Web UI template
 
-```
+Getting Started (Windows)
+1. Prerequisites
+Python 3.10+
+Git
+Groq API Key (GROQ_API_KEY)
+PostgreSQL connection URL (DATABASE_URL)
 
----
-
-## Getting Started
-
-### Prerequisites
-
-Before cloning and running the project locally, verify your environment meets the following requirements:
-
-* **Python:** Version 3.10 or higher installed.
-* **PostgreSQL:** Running locally or accessible via a remote connection string.
-* **API Keys Required:**
-* **Groq API Key** (`GROQ_API_KEY`) for ultra-fast agent inference.
-* **AviationStack API Key** (`AVIATIONSTACK_API_KEY`) for live flight data and routing schedules.
-* **Tavily API Key** (`TAVILY_API_KEY`) for web-grounded hotel and destination research.
-
-
-
-### Installation
-
-1. **Clone the repository:**
-```bash
-git clone [https://github.com/TheRealAJ-Cypher/TripCrew-AI.git](https://github.com/TheRealAJ-Cypher/TripCrew-AI.git)
-cd TripCrew-AI
-
-```
-
-
-2. **Create and activate a virtual environment:**
-```bash
+2. Virtual Environment & Dependencies
+PowerShell
 python -m venv .venv
-# On macOS / Linux:
-source .venv/bin/activate
-# On Windows (PowerShell):
 .venv\Scripts\Activate.ps1
-
-```
-
-
-3. **Install dependencies:**
-```bash
-python -m pip install --upgrade pip
 pip install -r requirements.txt
+3. Environment Variables (.env)
+Create a .env file in the project root (do not commit .env to Git):
 
-```
-
-
-
-### Environment Configuration
-
-Create a `.env` file in the root directory of your project and configure your environment variables:
-
-```env
-# PostgreSQL Database Connection
-DATABASE_URL=postgresql://postgres:postgres@localhost:5432/travel_db
-
-# LLM Inference Provider
+Code snippet
 GROQ_API_KEY=your_groq_api_key_here
-
-# External Tool APIs
-AVIATIONSTACK_API_KEY=your_aviationstack_api_key_here
-TAVILY_API_KEY=your_tavily_api_key_here
-
-# Default Departure Airport (IATA Code)
-DEFAULT_ORIGIN_IATA=MAA
-
-```
-
-### Running the Application
-
-1. **Start your PostgreSQL instance** and ensure the database (`travel_db`) is created.
-2. **Start the FastAPI application server:**
-```bash
+DATABASE_URL=your_postgresql_connection_string_here
+4. Run the Application
+PowerShell
 python app.py
+Open http://127.0.0.1:8000 in your browser. To run the custom weather MCP server separately during experimentation:
 
-```
+PowerShell
+python custom_weather_mcp_server.py
+API Workflow
+POST /api/travel — Starts or continues a thread_id run, applies the input guardrail and supervisor routing, executes specialist and draft itinerary steps, and pauses at human_approval when review is required.
 
-
-3. **Access the application:** Open your browser and navigate to `http://127.0.0.1:8000/`.
-
----
-
-## API Reference
-
-### `GET /health`
-
-Performs a liveness and health check on the FastAPI backend.
-
-```bash
-curl [http://127.0.0.1:8000/health](http://127.0.0.1:8000/health)
-
-```
-
-### `POST /api/travel`
-
-Submits a natural-language user travel request into the LangGraph execution engine.
-
-```bash
-curl -X POST [http://127.0.0.1:8000/api/travel](http://127.0.0.1:8000/api/travel) \
-  -H "Content-Type: application/json" \
-  -d '{"message": "Plan a 3-day trip to Tokyo with a budget of $1200"}'
-
-```
-
----
-
-## State Persistence, Guardrails & HITL
-
-* **PostgreSQL Checkpointing:** State across every multi-turn conversation is bound to a unique `thread_id` and persisted inside PostgreSQL, ensuring fault tolerance, session recovery, and conversation memory.
-* **Safety Guardrails:**
-* *Ingress Guardrails* intercept prompt injections, jailbreaks, and off-topic queries before tokens reach the LLM.
-* *Egress Guardrails* validate that synthesized travel plans adhere strictly to user budget caps and verified tool outputs.
-
-
-* **Human-in-the-Loop (HITL) Workflows:** The graph pauses at designated review nodes using LangGraph interrupts. Users can inspect proposed itineraries in the web interface, request adjustments, and approve executions seamlessly.
-
----
-
-## Testing
-
-Run the automated test suite to verify graph compilation, guardrail logic, and tool bindings:
-
-```bash
-python test.py
-
-```
-
----
-
-## License
-
-This project is licensed under the **MIT License** — see the LICENSE file for details.
-
-```
-
-```
+POST /api/travel/resume — Resumes the paused graph thread with approved (true or false) and optional feedback to run final_agent and return the completed plan.
